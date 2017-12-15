@@ -12,12 +12,46 @@
 #include <malloc.h>
 #include <string.h>
 #include <resolv.h>
+#include <fcntl.h>
+#include <errno.h>
+
+#define PACKET_SIZE sizeof(struct iphdr) + sizeof(struct icmphdr)
 
 int sock;
+int TTL = 1;
+int flag_dst_reached = 0;
+
+
+struct packet_list {
+    char* packet;
+    int size;
+    struct packet_list* next;
+};
+
+struct address_list {
+    char* address;
+    struct address_list* next;
+};
+
+
+struct address_list* hstlst = NULL;
+struct packet_list* pktlst = NULL;
+
+/**
+* function to free packet_list
+*/
+
+void free_list(struct packet_list*);
+
+/**
+* function to display packet list content
+*/
+void display_packet_list();
+
 /**
 * function to display buffer content
 */
-void display_packet_content(void* buffer, uint32_t size);
+void display_packet_content(void* buffer);
 
 /**
 * function to ping destination
@@ -33,6 +67,11 @@ void trace(struct hostent*);
 * checksum function
 */
 unsigned short in_cksum(unsigned short *, int );
+
+/**
+ * delay function
+ */
+void delay();
 
 
 
@@ -60,12 +99,18 @@ int main(int argc, char* argv[]) {
         host = gethostbyaddr(&addr, sizeof(addr), AF_INET);
     }
     printf("Host name %s\n", host->h_name);
-    printf("Ip address %s\n", inet_ntoa((*((struct in_addr**)host->h_addr_list)[0])));
+    printf("Ip address %s\n", inet_ntoa((*((struct in_addr**)host->h_addr_list)[0])));//
 
-    ping(host);
 
     while(1) {
+        ping(host);
+        delay();
         trace(host);
+        free_list(pktlst);
+        pktlst = NULL;
+        TTL++;
+        if(flag_dst_reached == 1)
+            break;
     }
 
 
@@ -123,16 +168,24 @@ void ping(struct hostent* host) {
         exit(-1);
     }*/
 
+    const int val = TTL;
+    if(-1 == setsockopt(sock, IPPROTO_IP, IP_TTL, &val, sizeof(val) )) {
+        perror("Error setting TTL\n");
+        exit(-1);
+    }
 
+    //set non blocking socket
+    fcntl(sock, F_SETFL, O_NONBLOCK);
     //sending 10 packets
     for(int i = 0; i < 10; i++) {
         if(-1 == sendto(sock, icmp, sizeof(struct icmphdr), 0, (struct sockaddr*)&dest_addr, sizeof(dest_addr))) {
             perror("Error sending packet\n");
             exit(-1);
         }
-        printf("Sent %ld bytes\n", sizeof(struct iphdr) + sizeof(struct icmphdr));
-        printf("Packet type: %d\n", icmp->type);
+        //printf("Sent %ld bytes\n", sizeof(struct iphdr) + sizeof(struct icmphdr));
+        //printf("Packet type: %d\n", icmp->type);
     }
+
 }
 
 unsigned short in_cksum(unsigned short *addr, int len)
@@ -170,26 +223,95 @@ void trace(struct hostent* host) {
     int recvlen;
     struct iphdr* ip;
     struct icmphdr* icmp;
+    int received_ans = 0;
+    struct packet_list* packet;
+
     buffer = malloc(sizeof(struct iphdr) + sizeof(struct icmphdr));
      //populating socket address
     //dest_addr.sin_port = 0;
     //dest_addr.sin_family = AF_INET;
     //dest_addr.sin_addr.s_addr = (*((struct in_addr**)host->h_addr_list)[0]).s_addr;
 
+    //allocating packet list
     socklen_t len = sizeof(dest_addr);
-    if(-1 == (recvlen = recvfrom(sock, buffer, sizeof(struct iphdr) + sizeof(struct icmphdr), 0, (struct sockaddr*)&dest_addr, &len))) {
-        printf("Error receiving packets\n");
-        exit(-1);
+    while(1) {
+        recvlen = recvfrom(sock, buffer, sizeof(struct iphdr) + sizeof(struct icmphdr), 0, (struct sockaddr*)&dest_addr, &len);
+        if(-1 == recvlen) {
+            if( errno == EAGAIN || errno == EWOULDBLOCK)
+                break;
+            else {
+                perror("Error receiving messages\n");
+                exit(-1);
+            }
+        }
+        else if(recvlen == 0) {
+            printf("No more packets\n");
+            break;
+        }
+        else {
+            printf("Received packet\n");
+            received_ans++;
+            //printf("Packet size %d received packets %d\n", (PACKET_SIZE), received_ans);
+            //allocating new packet
+            packet = calloc(1, sizeof(struct packet_list));
+            packet->packet = calloc(1, recvlen);
+            packet->size = recvlen;
+            //printf("Size to write %d\n", (PACKET_SIZE)*received_ans);
+            //printf("Packet list pointer %p\n", packet_list);
+            //printf("Point to write %p\n", packet_list+(received_ans-1)*(PACKET_SIZE));
+            memcpy(packet->packet, buffer, recvlen);
+            packet->next = pktlst;
+            pktlst = packet;
+        }
     }
-    else {
-        printf("Received packet\n");
-        ip = (struct iphdr*) buffer;
-        icmp = (struct icmphdr*) (buffer + sizeof(struct iphdr));
-        printf("Packet received from %s\n", inet_ntoa(dest_addr.sin_addr));
-        char * cp = (char *)&ip->saddr;
-        printf("Received %d byte reply from %u.%u.%u.%u:\n", ntohs(ip->tot_len), cp[0]&0xff,cp[1]&0xff,cp[2]&0xff,cp[3]&0xff);
-        printf("ID: %d\n", ntohs(ip->id));
-        printf("TTL: %d\n", ip->ttl);
-        printf("Packet type: %d \n", icmp->type);
+    display_packet_list();
+}
+
+void delay() {
+    for ( int c = 1 ; c < 1999967295 ; c++ )
+        {}
+}
+
+void display_packet_list() {
+    if(pktlst != NULL) {
+        do {
+            display_packet_content(pktlst->packet);
+            pktlst = pktlst->next;
+        }
+        while (pktlst->next != NULL);
+    }
+    printf("\n");
+}
+
+void display_packet_content(void* buffer) {
+    struct iphdr* ip;
+    struct icmphdr *icmp;
+    struct in_addr addr;
+
+
+
+    ip = (struct iphdr*) buffer;
+    icmp = buffer+ip->ihl*4;
+    addr.s_addr = ip->saddr;
+
+    //printf("IPv%d: hdr-size=%d pkt-size=%d protocol=%d TTL=%d ID=%d src=%s\n",
+		//ip->version, ip->ihl*4, ntohs(ip->tot_len), ip->protocol,
+		//ip->ttl, ip->id, inet_ntoa(addr));
+	printf("src=%s ", inet_ntoa(addr));
+    //printf("ICMP: type[%d/%d] checksum[%d] id[%d] seq[%d]\n",
+		//	icmp->type, icmp->code, ntohs(icmp->checksum),
+			//icmp->un.echo.id, icmp->un.echo.sequence);
+    if(icmp->type == 0) {
+        flag_dst_reached = 1;
+    }
+}
+
+void free_list(struct packet_list* pktlst) {
+    struct packet_list* temp;
+    while(pktlst != NULL) {
+        temp = pktlst->next;
+        free(pktlst->packet);
+        free(pktlst);
+        pktlst = temp;
     }
 }

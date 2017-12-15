@@ -17,19 +17,30 @@
 
 #define PACKET_SIZE sizeof(struct iphdr) + sizeof(struct icmphdr)
 
+#define free_list(list, type) { \
+    struct type* temp; \
+    while(list != NULL) { \
+        temp = list->next; \
+        free(list->buffer); \
+        free(list); \
+        list = temp; \
+    } \
+    list = NULL;\
+}
+
 int sock;
 int TTL = 1;
 int flag_dst_reached = 0;
 
 
 struct packet_list {
-    char* packet;
+    char* buffer;
     int size;
     struct packet_list* next;
 };
 
 struct address_list {
-    char* address;
+    char* buffer;
     struct address_list* next;
 };
 
@@ -38,10 +49,17 @@ struct address_list* hstlst = NULL;
 struct packet_list* pktlst = NULL;
 
 /**
-* function to free packet_list
+* function to add address to list
 */
 
-void free_list(struct packet_list*);
+void add_address(struct address_list* lst, const char* addr);
+
+/**
+* function that returns 1 if address found, 0 if not
+*/
+
+int find_address(struct address_list*, const char*);
+
 
 /**
 * function to display packet list content
@@ -106,8 +124,8 @@ int main(int argc, char* argv[]) {
         ping(host);
         delay();
         trace(host);
-        free_list(pktlst);
-        pktlst = NULL;
+        free_list(pktlst, packet_list);
+        free_list(hstlst, address_list);
         TTL++;
         if(flag_dst_reached == 1)
             break;
@@ -130,7 +148,6 @@ void ping(struct hostent* host) {
         perror("Can't create socket\n");
         exit(-1);
     }
-    printf("Socket created\n");
     //populating socket address
     memset(&dest_addr, 0, sizeof(dest_addr));
     dest_addr.sin_port = 0;
@@ -249,17 +266,16 @@ void trace(struct hostent* host) {
             break;
         }
         else {
-            printf("Received packet\n");
             received_ans++;
             //printf("Packet size %d received packets %d\n", (PACKET_SIZE), received_ans);
             //allocating new packet
             packet = calloc(1, sizeof(struct packet_list));
-            packet->packet = calloc(1, recvlen);
+            packet->buffer = calloc(1, recvlen);
             packet->size = recvlen;
             //printf("Size to write %d\n", (PACKET_SIZE)*received_ans);
             //printf("Packet list pointer %p\n", packet_list);
             //printf("Point to write %p\n", packet_list+(received_ans-1)*(PACKET_SIZE));
-            memcpy(packet->packet, buffer, recvlen);
+            memcpy(packet->buffer, buffer, recvlen);
             packet->next = pktlst;
             pktlst = packet;
         }
@@ -273,12 +289,16 @@ void delay() {
 }
 
 void display_packet_list() {
+    printf("TTL: %d ", TTL);
     if(pktlst != NULL) {
         do {
-            display_packet_content(pktlst->packet);
+            display_packet_content(pktlst->buffer);
             pktlst = pktlst->next;
         }
         while (pktlst->next != NULL);
+    }
+    else {
+        printf("---------");
     }
     printf("\n");
 }
@@ -294,10 +314,25 @@ void display_packet_content(void* buffer) {
     icmp = buffer+ip->ihl*4;
     addr.s_addr = ip->saddr;
 
+    if(!(find_address(hstlst, inet_ntoa(addr)))) {
+        struct address_list* temp;
+        struct hostent* temp_host;
+
+        temp = malloc(sizeof(struct address_list));
+        temp->buffer = malloc(100);
+        strcpy(temp->buffer, inet_ntoa(addr));
+        temp->next = hstlst;
+        hstlst = temp;
+        printf("%s ", inet_ntoa(addr));
+        temp_host = gethostbyaddr(&addr, sizeof(addr), AF_INET);
+        if(temp_host != NULL)
+            if(temp_host->h_name != NULL)
+                printf("%s ", temp_host->h_name);
+    }
     //printf("IPv%d: hdr-size=%d pkt-size=%d protocol=%d TTL=%d ID=%d src=%s\n",
 		//ip->version, ip->ihl*4, ntohs(ip->tot_len), ip->protocol,
 		//ip->ttl, ip->id, inet_ntoa(addr));
-	printf("src=%s ", inet_ntoa(addr));
+
     //printf("ICMP: type[%d/%d] checksum[%d] id[%d] seq[%d]\n",
 		//	icmp->type, icmp->code, ntohs(icmp->checksum),
 			//icmp->un.echo.id, icmp->un.echo.sequence);
@@ -306,12 +341,19 @@ void display_packet_content(void* buffer) {
     }
 }
 
-void free_list(struct packet_list* pktlst) {
-    struct packet_list* temp;
-    while(pktlst != NULL) {
-        temp = pktlst->next;
-        free(pktlst->packet);
-        free(pktlst);
-        pktlst = temp;
+int find_address(struct address_list* addrlst, const char* addr) {
+    if(addrlst == NULL)
+        return 0;
+    do {
+        if(strcmp(addr, addrlst->buffer) == 0)
+            return 1;
+        addrlst = addrlst->next;
     }
+    while(addrlst != NULL);
+
+    return 0;
 }
+
+
+
+
